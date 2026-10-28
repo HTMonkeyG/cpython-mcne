@@ -49,6 +49,22 @@
 #define TYPE_SET                '<'
 #define TYPE_FROZENSET          '>'
 
+/* NetEase Minecraft (.mcs) extensions.  Strings and unicode are stored with
+   their bytes XORed with 0x8D, or encrypted with a fixed RC4 key; code
+   objects use a reordered "o"/"M" layout and carry a magic number that
+   selects one of three bytecode numbering schemes. */
+#define TYPE_MCS_o                      'o'   /* reordered code object      */
+#define TYPE_MCS_M                      'M'   /* reordered code object + tail */
+#define TYPE_MCS_ENC_STRING             0x08  /* xor 0x8D string            */
+#define TYPE_MCS_ENC_UNICODE            0x0E  /* xor 0x8D utf-8 unicode     */
+#define TYPE_MCS_ENC_INTERNED           0x0F  /* xor 0x8D interned string   */
+#define TYPE_MCS_RC4_STRING             'm'   /* rc4 string                 */
+#define TYPE_MCS_RC4_INTERNED           'b'   /* rc4 interned string        */
+#define TYPE_MCS_RC4_UNICODE            '1'   /* rc4 utf-8 unicode          */
+
+#define MCS_XOR_KEY 0x8D
+#define MCS_HAVE_ARGUMENT 0x5D          /* mcs opcodes >= this take a 16-bit arg */
+
 #define WFERR_OK 0
 #define WFERR_UNMARSHALLABLE 1
 #define WFERR_NESTEDTOODEEP 2
@@ -64,6 +80,7 @@ typedef struct {
     char *end;
     PyObject *strings; /* dict on marshal, list on unmarshal */
     int version;
+    void *mcs_tail;    /* NEPy: 8-byte trailer copied into 'M' code objects */
 } WFILE;
 
 #define w_byte(c, p) if (((p)->fp)) putc((c), (p)->fp); \
@@ -629,6 +646,318 @@ r_PyLong(RFILE *p)
     return NULL;
 }
 
+/* ------------------------------------------------------------------------
+ * NetEase Minecraft (.mcs) support
+ *
+ * The bytecode of every mcs code object is numbered with one of three
+ * private opcode tables (selected by co_magicnum).  Because NetEase kept
+ * CPython's execution model and only renumbered the opcodes, the tables
+ * below translate each mcs opcode into the stock 2.7 opcode with the same
+ * meaning.  Translating co_code in place therefore lets the unmodified
+ * ceval loop execute mcs code; instruction sizes are preserved because an
+ * mcs opcode takes an argument iff its stock counterpart does.
+ * ---------------------------------------------------------------------- */
+
+static const unsigned char mcs_rc4_key[12] = {
+    0x8D, 0x06, 0xE8, 0xC8, 0xB7, 0xD7,
+    0xB7, 0x28, 0x46, 0x51, 0xAE, 0x04
+};
+
+static PyObject *r_object(RFILE *p);
+
+static void
+mcs_rc4_xor(unsigned char *data, Py_ssize_t n)
+{
+    unsigned char s[256];
+    unsigned char t;
+    Py_ssize_t i, j = 0, k;
+
+    for (i = 0; i < 256; i++)
+        s[i] = (unsigned char)i;
+    for (i = 0; i < 256; i++) {
+        j = (j + s[i] + mcs_rc4_key[i % sizeof(mcs_rc4_key)]) & 0xff;
+        t = s[i]; s[i] = s[j]; s[j] = t;
+    }
+    i = j = 0;
+    for (k = 0; k < n; k++) {
+        i = (i + 1) & 0xff;
+        j = (j + s[i]) & 0xff;
+        t = s[i]; s[i] = s[j]; s[j] = t;
+        data[k] ^= s[(s[i] + s[j]) & 0xff];
+    }
+}
+
+/* mcs opcode -> stock 2.7 opcode; 0xFF marks an opcode unused by that
+   version.  Derived from NEPyEval_EvalFrameEx_MCS1/2/3. */
+static const unsigned char mcs_opmap_1[256] = {
+    0x4A, 0x0F, 0x1C, 0x38, 0x28, 0x29, 0x2A, 0x2B, 0x0B, 0x18, 0xFF, 0xFF, 0xFF, 0x42, 0xFF, 0x52,
+    0x4E, 0x55, 0x1B, 0xFF, 0x32, 0x33, 0x34, 0x35, 0xFF, 0xFF, 0x3A, 0x46, 0x3B, 0x0C, 0x49, 0x16,
+    0xFF, 0xFF, 0xFF, 0xFF, 0x13, 0x56, 0x51, 0x03, 0xFF, 0x4B, 0x1A, 0x36, 0x19, 0x4F, 0x3F, 0x4D,
+    0x41, 0x05, 0x44, 0xFF, 0x48, 0x02, 0xFF, 0x59, 0x14, 0x57, 0xFF, 0x53, 0x50, 0xFF, 0x54, 0x17,
+    0x15, 0x58, 0xFF, 0x3D, 0xFF, 0x40, 0x39, 0x1E, 0x1F, 0x20, 0x21, 0x3E, 0xFF, 0xFF, 0x4C, 0x3C,
+    0x04, 0xFF, 0x0D, 0xFF, 0x0A, 0xFF, 0x01, 0xFF, 0x37, 0x1D, 0x09, 0x43, 0x47, 0x64, 0xFF, 0x7A,
+    0xFF, 0xFF, 0xFF, 0xFF, 0x5D, 0x8F, 0x7D, 0xFF, 0xFF, 0xFF, 0xFF, 0x85, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0x5A, 0xFF, 0x5B, 0xFF, 0xFF, 0x83, 0xFF, 0xFF, 0x66, 0x86, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0x6B, 0x92, 0xFF, 0xFF, 0x89, 0x6A, 0xFF, 0xFF, 0x5C, 0x6D, 0x5F, 0xFF, 0xFF, 0xFF,
+    0x60, 0xFF, 0xFF, 0xFF, 0x6C, 0xFF, 0x74, 0xFF, 0x7E, 0x78, 0xFF, 0xFF, 0xFF, 0xFF, 0x87, 0xFF,
+    0x72, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x88, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x61, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x8C, 0x8D, 0x8E, 0xFF, 0xFF, 0x6F, 0x84, 0x6E, 0xFF, 0xFF, 0x63, 0xFF, 0x91, 0xFF, 0xFF, 0x62,
+    0xFF, 0xFF, 0x5E, 0x73, 0x79, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0x7C, 0xFF, 0xFF, 0xFF, 0x70, 0x69, 0x65, 0xFF, 0x93, 0x82, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x68, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x77, 0xFF, 0xFF, 0x71, 0xFF, 0x67, 0xFF, 0xFF, 0xFF
+};
+static const unsigned char mcs_opmap_2[256] = {
+    0xFF, 0x05, 0x4C, 0x0F, 0x28, 0x29, 0x2A, 0x2B, 0x19, 0x48, 0x3B, 0x13, 0xFF, 0x4B, 0x1B, 0x44,
+    0x38, 0x57, 0x56, 0x1C, 0x36, 0x14, 0xFF, 0x47, 0x39, 0xFF, 0x51, 0x1E, 0x1F, 0x20, 0x21, 0x3F,
+    0xFF, 0xFF, 0xFF, 0x3C, 0xFF, 0xFF, 0xFF, 0x3A, 0x58, 0x4D, 0x15, 0x04, 0x0A, 0xFF, 0x50, 0x49,
+    0xFF, 0x46, 0xFF, 0x43, 0x03, 0x52, 0x18, 0xFF, 0xFF, 0xFF, 0xFF, 0x3E, 0x4E, 0xFF, 0x32, 0x33,
+    0x34, 0x35, 0x0D, 0x59, 0x4F, 0xFF, 0x0B, 0x1D, 0x41, 0x17, 0xFF, 0x16, 0xFF, 0x37, 0x42, 0x55,
+    0x02, 0x53, 0x54, 0x01, 0xFF, 0xFF, 0x0C, 0x1A, 0x4A, 0x3D, 0x09, 0xFF, 0x40, 0xFF, 0xFF, 0xFF,
+    0x89, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x91, 0xFF, 0xFF, 0xFF, 0xFF, 0x5D, 0xFF, 0xFF, 0x63, 0x68,
+    0xFF, 0xFF, 0xFF, 0xFF, 0x7A, 0xFF, 0xFF, 0xFF, 0xFF, 0x6E, 0xFF, 0x71, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0x65, 0x88, 0x61, 0x5B, 0x74, 0x6A, 0xFF, 0xFF, 0x7C, 0xFF, 0xFF, 0xFF,
+    0x83, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7D,
+    0xFF, 0x69, 0x7E, 0x6D, 0xFF, 0xFF, 0x86, 0x77, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x67,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x82, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x92, 0xFF, 0xFF,
+    0xFF, 0xFF, 0x8F, 0x6F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x5A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x78, 0x79, 0xFF, 0xFF, 0x5F, 0x70, 0x87, 0xFF, 0x5E, 0xFF, 0x72, 0xFF, 0xFF, 0xFF, 0x64, 0x93,
+    0xFF, 0x60, 0xFF, 0xFF, 0x6B, 0x66, 0xFF, 0xFF, 0xFF, 0x8C, 0x8D, 0x8E, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x62, 0xFF, 0xFF, 0x73, 0xFF, 0xFF, 0xFF, 0x84, 0xFF, 0xFF, 0x6C, 0xFF, 0x85, 0xFF, 0x5C, 0xFF
+};
+static const unsigned char mcs_opmap_3[256] = {
+    0xFF, 0x53, 0x51, 0xFF, 0x3E, 0x4A, 0xFF, 0xFF, 0x1E, 0x1F, 0x20, 0x21, 0x09, 0xFF, 0x37, 0x17,
+    0x0B, 0xFF, 0x52, 0xFF, 0x4B, 0x44, 0xFF, 0x02, 0xFF, 0xFF, 0x15, 0x0D, 0x3F, 0xFF, 0xFF, 0x42,
+    0x1D, 0xFF, 0x04, 0x55, 0x57, 0x39, 0x36, 0xFF, 0x4D, 0xFF, 0x4F, 0x41, 0x14, 0x46, 0x38, 0x3C,
+    0x47, 0x1B, 0x0C, 0x03, 0xFF, 0x16, 0xFF, 0x59, 0x56, 0x43, 0xFF, 0x3A, 0x28, 0x29, 0x2A, 0x2B,
+    0x1C, 0x0F, 0xFF, 0x3D, 0x01, 0x48, 0x1A, 0x19, 0x3B, 0x50, 0x0A, 0xFF, 0x18, 0x54, 0x05, 0x58,
+    0xFF, 0x13, 0xFF, 0xFF, 0x32, 0x33, 0x34, 0x35, 0x40, 0x4C, 0xFF, 0x49, 0x4E, 0xFF, 0x89, 0xFF,
+    0xFF, 0x69, 0xFF, 0xFF, 0xFF, 0xFF, 0x63, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0x91, 0xFF, 0x83, 0xFF, 0xFF, 0xFF, 0x79, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0x5F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x85, 0xFF, 0x8C, 0x8D, 0x8E,
+    0xFF, 0xFF, 0xFF, 0xFF, 0x6E, 0x5A, 0xFF, 0xFF, 0xFF, 0x7E, 0xFF, 0xFF, 0xFF, 0xFF, 0x5C, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x86, 0xFF, 0xFF, 0x66,
+    0x72, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7A, 0xFF, 0x93, 0x82, 0xFF, 0x62, 0xFF,
+    0x7D, 0xFF, 0x84, 0xFF, 0x70, 0xFF, 0x92, 0xFF, 0xFF, 0xFF, 0x60, 0xFF, 0x65, 0x88, 0xFF, 0xFF,
+    0xFF, 0x68, 0x6A, 0xFF, 0x61, 0x6B, 0x77, 0xFF, 0xFF, 0x87, 0xFF, 0x6D, 0x8F, 0x5B, 0xFF, 0x64,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x67, 0xFF, 0xFF, 0x71, 0x78, 0xFF, 0x6C, 0xFF, 0xFF, 0x5D, 0xFF,
+    0xFF, 0xFF, 0x73, 0x6F, 0x7C, 0xFF, 0xFF, 0x5E, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x74, 0xFF, 0xFF
+};
+
+static int
+mcs_magic_is_2(int magic)
+{
+    return (unsigned int)magic == (unsigned int)NEPY_MCS_MAGIC_2;
+}
+
+static int
+mcs_magic_is_3(int magic)
+{
+    return (unsigned int)magic == (unsigned int)NEPY_MCS_MAGIC_3;
+}
+
+static void
+mcs_translate_code(PyCodeObject *co)
+{
+    const unsigned char *map;
+    unsigned char *code;
+    Py_ssize_t size, i;
+
+    if (co == NULL || !PyString_Check(co->co_code))
+        return;
+    if (mcs_magic_is_2(co->co_magicnum))
+        map = mcs_opmap_2;
+    else if (mcs_magic_is_3(co->co_magicnum))
+        map = mcs_opmap_3;
+    else
+        map = mcs_opmap_1;
+
+    code = (unsigned char *)PyString_AS_STRING(co->co_code);
+    size = PyString_GET_SIZE(co->co_code);
+    for (i = 0; i < size; ) {
+        unsigned char op = code[i];
+        unsigned char mapped = map[op];
+        if (mapped != 0xFF)
+            code[i] = mapped;
+        i += (op >= MCS_HAVE_ARGUMENT) ? 3 : 1;
+    }
+}
+
+/* xor / rc4 encrypted string */
+static PyObject *
+r_mcs_string(RFILE *p, int intern_string, int rc4)
+{
+    Py_ssize_t n = r_long(p);
+    PyObject *v;
+    char *s;
+    Py_ssize_t i;
+
+    if (n < 0 || n > SIZE32_MAX) {
+        PyErr_SetString(PyExc_ValueError,
+                        "bad marshal data (string size out of range)");
+        return NULL;
+    }
+    v = PyString_FromStringAndSize((char *)NULL, n);
+    if (v == NULL)
+        return NULL;
+    if (r_string(PyString_AS_STRING(v), n, p) != n) {
+        Py_DECREF(v);
+        PyErr_SetString(PyExc_EOFError, "EOF read where object expected");
+        return NULL;
+    }
+    s = PyString_AS_STRING(v);
+    if (rc4) {
+        mcs_rc4_xor((unsigned char *)s, n);
+    }
+    else {
+        for (i = 0; i < n; i++)
+            s[i] = (char)(s[i] ^ MCS_XOR_KEY);
+    }
+    if (intern_string) {
+        PyString_InternInPlace(&v);
+        if (PyList_Append(p->strings, v) < 0) {
+            Py_DECREF(v);
+            return NULL;
+        }
+    }
+    return v;
+}
+
+/* xor / rc4 encrypted utf-8 unicode string */
+static PyObject *
+r_mcs_unicode(RFILE *p, int rc4)
+{
+    Py_ssize_t n = r_long(p);
+    Py_ssize_t i;
+    char *buffer;
+    PyObject *v;
+
+    if (n < 0 || n > SIZE32_MAX) {
+        PyErr_SetString(PyExc_ValueError,
+                        "bad marshal data (unicode size out of range)");
+        return NULL;
+    }
+    buffer = PyMem_NEW(char, n);
+    if (buffer == NULL)
+        return PyErr_NoMemory();
+    if (r_string(buffer, n, p) != n) {
+        PyMem_DEL(buffer);
+        PyErr_SetString(PyExc_EOFError, "EOF read where object expected");
+        return NULL;
+    }
+    if (rc4) {
+        mcs_rc4_xor((unsigned char *)buffer, n);
+    }
+    else {
+        for (i = 0; i < n; i++)
+            buffer[i] = (char)(buffer[i] ^ MCS_XOR_KEY);
+    }
+    v = PyUnicode_DecodeUTF8(buffer, n, NULL);
+    PyMem_DEL(buffer);
+    return v;
+}
+
+/* 'o' / 'M' code objects: the fields are stored in a different order than
+   stock marshal and an extra magic (and, for 'M', a tail) is appended. */
+static PyObject *
+r_mcs_code(RFILE *p, int type)
+{
+    PyObject *v = NULL;
+    PyObject *code = NULL, *consts = NULL, *names = NULL, *varnames = NULL;
+    PyObject *freevars = NULL, *cellvars = NULL, *filename = NULL;
+    PyObject *name = NULL, *lnotab = NULL;
+    int argcount, nlocals, stacksize, flags, firstlineno, magic;
+
+    if (PyEval_GetRestricted()) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "cannot unmarshal code objects in "
+                        "restricted execution mode");
+        return NULL;
+    }
+
+    if (type == TYPE_MCS_o) {
+        nlocals = (int)r_long(p);
+        flags = (int)r_long(p);
+        consts = r_object(p);
+        if (consts == NULL) goto error;
+        stacksize = (int)r_long(p);
+        varnames = r_object(p);
+        if (varnames == NULL) goto error;
+        argcount = (int)r_long(p);
+        cellvars = r_object(p);
+        if (cellvars == NULL) goto error;
+        names = r_object(p);
+        if (names == NULL) goto error;
+        freevars = r_object(p);
+        if (freevars == NULL) goto error;
+        name = r_object(p);
+        if (name == NULL) goto error;
+        code = r_object(p);
+        if (code == NULL) goto error;
+        firstlineno = (int)r_long(p);
+        lnotab = r_object(p);
+        if (lnotab == NULL) goto error;
+        magic = (int)r_long(p);
+        filename = r_object(p);
+        if (filename == NULL) goto error;
+        v = (PyObject *)PyCode_New(argcount, nlocals, stacksize, flags,
+                                   code, consts, names, varnames,
+                                   freevars, cellvars, filename, name,
+                                   firstlineno, lnotab);
+        if (v != NULL) {
+            NEPyCode_SetMagicNum((PyCodeObject *)v, magic);
+            mcs_translate_code((PyCodeObject *)v);
+        }
+    }
+    else { /* TYPE_MCS_M */
+        argcount = (int)r_long(p);
+        lnotab = r_object(p);
+        if (lnotab == NULL) goto error;
+        cellvars = r_object(p);
+        if (cellvars == NULL) goto error;
+        firstlineno = (int)r_long(p);
+        varnames = r_object(p);
+        if (varnames == NULL) goto error;
+        consts = r_object(p);
+        if (consts == NULL) goto error;
+        name = r_object(p);
+        if (name == NULL) goto error;
+        stacksize = (int)r_long(p);
+        freevars = r_object(p);
+        if (freevars == NULL) goto error;
+        names = r_object(p);
+        if (names == NULL) goto error;
+        code = r_object(p);
+        if (code == NULL) goto error;
+        flags = (int)r_long(p);
+        filename = r_object(p);
+        if (filename == NULL) goto error;
+        nlocals = (int)r_long(p);
+        magic = (int)r_long(p);
+        v = (PyObject *)PyCode_New(argcount, nlocals, stacksize, flags,
+                                   code, consts, names, varnames,
+                                   freevars, cellvars, filename, name,
+                                   firstlineno, lnotab);
+        if (v != NULL) {
+            NEPyCode_SetMagicNum((PyCodeObject *)v, magic);
+            NEPyCode_SetTail((PyCodeObject *)v, p->mcs_tail);
+            mcs_translate_code((PyCodeObject *)v);
+        }
+    }
+
+  error:
+    Py_XDECREF(code);
+    Py_XDECREF(consts);
+    Py_XDECREF(names);
+    Py_XDECREF(varnames);
+    Py_XDECREF(freevars);
+    Py_XDECREF(cellvars);
+    Py_XDECREF(filename);
+    Py_XDECREF(name);
+    Py_XDECREF(lnotab);
+    return v;
+}
+
 
 static PyObject *
 r_object(RFILE *p)
@@ -875,6 +1204,25 @@ r_object(RFILE *p)
         }
 #endif
 
+    /* --- NetEase .mcs string encodings ------------------------------- */
+    case TYPE_MCS_ENC_STRING:               /* 0x08: xor 0x8D            */
+    case TYPE_MCS_ENC_INTERNED:             /* 0x0F: xor 0x8D + intern   */
+        retval = r_mcs_string(p, type == TYPE_MCS_ENC_INTERNED, 0);
+        break;
+
+    case TYPE_MCS_RC4_STRING:               /* 'm': rc4                  */
+    case TYPE_MCS_RC4_INTERNED:             /* 'b': rc4 + intern         */
+        retval = r_mcs_string(p, type == TYPE_MCS_RC4_INTERNED, 1);
+        break;
+
+    case TYPE_MCS_ENC_UNICODE:              /* 0x0E: xor 0x8D unicode    */
+        retval = r_mcs_unicode(p, 0);
+        break;
+
+    case TYPE_MCS_RC4_UNICODE:              /* '1': rc4 unicode          */
+        retval = r_mcs_unicode(p, 1);
+        break;
+
     case TYPE_TUPLE:
         n = r_long(p);
         if (n < 0 || n > SIZE32_MAX) {
@@ -1068,6 +1416,12 @@ r_object(RFILE *p)
         retval = v;
         break;
 
+    /* --- NetEase .mcs code objects ---------------------------------- */
+    case TYPE_MCS_o:                        /* 'o': reordered code object */
+    case TYPE_MCS_M:                        /* 'M': ... plus 8-byte tail  */
+        retval = r_mcs_code(p, type);
+        break;
+
     default:
         /* Bogus data got written, which isn't ideal.
            This will let you keep working and recover. */
@@ -1170,6 +1524,7 @@ PyMarshal_ReadObjectFromFile(FILE *fp)
     rf.strings = PyList_New(0);
     rf.depth = 0;
     rf.ptr = rf.end = NULL;
+    rf.mcs_tail = NULL;
     result = r_object(&rf);
     Py_DECREF(rf.strings);
     return result;
@@ -1185,6 +1540,7 @@ PyMarshal_ReadObjectFromString(char *str, Py_ssize_t len)
     rf.end = str + len;
     rf.strings = PyList_New(0);
     rf.depth = 0;
+    rf.mcs_tail = NULL;
     result = r_object(&rf);
     Py_DECREF(rf.strings);
     return result;
@@ -1303,6 +1659,7 @@ marshal_load(PyObject *self, PyObject *f)
     rf.fp = PyFile_AsFile(f);
     rf.strings = PyList_New(0);
     rf.depth = 0;
+    rf.mcs_tail = NULL;
     result = read_object(&rf);
     Py_DECREF(rf.strings);
     return result;
@@ -1356,6 +1713,7 @@ marshal_loads(PyObject *self, PyObject *args)
     rf.end = s + n;
     rf.strings = PyList_New(0);
     rf.depth = 0;
+    rf.mcs_tail = NULL;
     result = read_object(&rf);
     Py_DECREF(rf.strings);
     return result;

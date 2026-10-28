@@ -144,6 +144,8 @@ PyCode_New(int argcount, int nlocals, int stacksize, int flags,
         co->co_lnotab = lnotab;
         co->co_zombieframe = NULL;
         co->co_weakreflist = NULL;
+        co->co_magicnum = 0;
+        co->co_tail = NULL;
     }
     return co;
 }
@@ -710,6 +712,18 @@ PyCode_Addr2Line(PyCodeObject *co, int addrq)
         line += *p++;
     }
     return line;
+}
+
+void
+NEPyCode_SetMagicNum(PyCodeObject *co, int magic)
+{
+  co->co_magicnum = magic;
+}
+
+void
+NEPyCode_SetTail(PyCodeObject *co, void *val)
+{
+  co->co_tail = val;
 }
 
 /* Update *bounds to describe the first and one-past-the-last instructions in

@@ -10,7 +10,8 @@
 *.profclang?
 *.profraw
 *.dyn
-*.vs/
+.vs/
+.vscode/
 Doc/build/
 Doc/tools/docutils/
 Doc/tools/jinja2/

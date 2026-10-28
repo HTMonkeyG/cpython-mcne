@@ -27,6 +27,10 @@ typedef struct {
 				   Objects/lnotab_notes.txt for details. */
     void *co_zombieframe;     /* for optimization only (see frameobject.c) */
     PyObject *co_weakreflist;   /* to support weakrefs to code objects */
+
+    /* mcne specified fields (match NetEase's layout: 0x80 / 0x88) */
+    int co_magicnum;   /* mcs bytecode version (see NEPyEval_EvalFrameEx_MCS*) */
+    void *co_tail;     /* 8-byte trailer, only set by 'M' code objects */
 } PyCodeObject;
 
 /* Masks for co_flags above */
@@ -81,6 +85,16 @@ PyCode_NewEmpty(const char *filename, const char *funcname, int firstlineno);
    in this code object.  If you just need the line number of a frame,
    use PyFrame_GetLineNumber() instead. */
 PyAPI_FUNC(int) PyCode_Addr2Line(PyCodeObject *, int);
+
+/* Set the mcs bytecode version of the code object */
+PyAPI_FUNC(void) NEPyCode_SetMagicNum(PyCodeObject *, int);
+
+/* Set the 8-byte trailer of the code object */
+PyAPI_FUNC(void) NEPyCode_SetTail(PyCodeObject *, void *);
+
+/* mcs magic numbers carried by NEPy code objects */
+#define NEPY_MCS_MAGIC_2  0xCA49B20FUL
+#define NEPY_MCS_MAGIC_3  0xBC58DBD5UL
 
 /* for internal use only */
 #define _PyCode_GETCODEPTR(co, pp) \
