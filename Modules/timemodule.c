@@ -687,6 +687,13 @@ the local timezone used by methods such as localtime, but this behaviour\n\
 should not be relied on.");
 #endif /* HAVE_WORKING_TZSET */
 
+/* MSVC 2022 fix */
+#if defined(_MSC_VER) && _MSC_VER >= 1900
+#define timezone _timezone
+#define daylight _daylight
+#define tzname _tzname
+#endif
+
 static void
 inittimezone(PyObject *m) {
     /* This code moved from inittime wholesale to allow calling it from

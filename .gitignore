@@ -10,6 +10,7 @@
 *.profclang?
 *.profraw
 *.dyn
+*.vs/
 Doc/build/
 Doc/tools/docutils/
 Doc/tools/jinja2/
@@ -33,6 +34,8 @@ PCbuild/*.ncb
 PCbuild/*.o
 PCbuild/*.pdb
 PCbuild/Win32-temp-*
+PCbuild/amd64
+PCbuild/obj
 Parser/pgen
 Parser/pgen.stamp
 autom4te.cache
