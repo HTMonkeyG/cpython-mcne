@@ -64,6 +64,7 @@
 
 #define MCS_XOR_KEY 0x8D
 #define MCS_HAVE_ARGUMENT 0x5D          /* mcs opcodes >= this take a 16-bit arg */
+#define MCS_STOCK_HAVE_ARGUMENT 90      /* stock 2.7 HAVE_ARGUMENT */
 
 #define WFERR_OK 0
 #define WFERR_UNMARSHALLABLE 1
@@ -223,6 +224,66 @@ w_PyLong(const PyLongObject *ob, WFILE *p)
         w_short(d & PyLong_MARSHAL_MASK, p);
         d >>= PyLong_MARSHAL_SHIFT;
     } while (d != 0);
+}
+
+/* stock 2.7 opcode -> MCS1 opcode (inverse of mcs_opmap_1 below);
+   0xFF marks stock opcodes that MCS1 does not use. */
+static const unsigned char mcs_revmap_1[256] = {
+    0xFF, 0x56, 0x35, 0x27, 0x50, 0x31, 0xFF, 0xFF, 0xFF, 0x5A, 0x54, 0x08, 0x1D, 0x52, 0xFF, 0x01,
+    0xFF, 0xFF, 0xFF, 0x24, 0x38, 0x40, 0x1F, 0x3F, 0x09, 0x2C, 0x2A, 0x12, 0x02, 0x59, 0x47, 0x48,
+    0x49, 0x4A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x04, 0x05, 0x06, 0x07, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0x14, 0x15, 0x16, 0x17, 0x2B, 0x58, 0x03, 0x46, 0x1A, 0x1C, 0x4F, 0x43, 0x4B, 0x2E,
+    0x45, 0x30, 0x0D, 0x5B, 0x32, 0xFF, 0x1B, 0x5C, 0x34, 0x1E, 0x00, 0x29, 0x4E, 0x2F, 0x10, 0x2D,
+    0x3C, 0x26, 0x0F, 0x3B, 0x3E, 0x11, 0x25, 0x39, 0x41, 0x37, 0x72, 0x74, 0x8A, 0x64, 0xD2, 0x8C,
+    0x90, 0xB7, 0xCF, 0xCA, 0x5D, 0xE8, 0x7A, 0xFC, 0xF0, 0xE7, 0x87, 0x82, 0x94, 0x8B, 0xC7, 0xC5,
+    0xE6, 0xFA, 0xA0, 0xD3, 0x96, 0xFF, 0xFF, 0xF7, 0x99, 0xD4, 0x5F, 0xFF, 0xE2, 0x66, 0x98, 0xFF,
+    0xFF, 0xFF, 0xEB, 0x77, 0xC6, 0x6B, 0x7B, 0x9E, 0xAD, 0x86, 0xFF, 0xFF, 0xC0, 0xC1, 0xC2, 0x65,
+    0xFF, 0xCC, 0x83, 0xEA, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
+
+/* Write code objects in NetEase mcs 'o' (MCS1 numbering) form by default.
+   PYTHONMCS=0 in the environment restores stock 'c' output. */
+static int
+mcs_write_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        char *v = getenv("PYTHONMCS");
+        enabled = (v == NULL || atoi(v) != 0);
+    }
+    return enabled;
+}
+
+/* Return a copy of a stock-numbered bytecode string renumbered to MCS1.
+   Returns NULL (without setting an exception) if 'code' is not a string. */
+static PyObject *
+mcs_encode_code(PyObject *code)
+{
+    PyObject *out;
+    char *buf;
+    Py_ssize_t size, i;
+
+    if (!PyString_Check(code))
+        return NULL;
+    size = PyString_GET_SIZE(code);
+    out = PyString_FromStringAndSize(PyString_AS_STRING(code), size);
+    if (out == NULL)
+        return NULL;
+    buf = PyString_AS_STRING(out);
+    for (i = 0; i < size; ) {
+        unsigned char op = (unsigned char)buf[i];
+        unsigned char mapped = mcs_revmap_1[op];
+        if (mapped != 0xFF)
+            buf[i] = (char)mapped;
+        i += (op >= MCS_STOCK_HAVE_ARGUMENT) ? 3 : 1;
+    }
+    return out;
 }
 
 static void
@@ -444,21 +505,54 @@ w_object(PyObject *v, WFILE *p)
     }
     else if (PyCode_Check(v)) {
         PyCodeObject *co = (PyCodeObject *)v;
-        w_byte(TYPE_CODE, p);
-        w_long(co->co_argcount, p);
-        w_long(co->co_nlocals, p);
-        w_long(co->co_stacksize, p);
-        w_long(co->co_flags, p);
-        w_object(co->co_code, p);
-        w_object(co->co_consts, p);
-        w_object(co->co_names, p);
-        w_object(co->co_varnames, p);
-        w_object(co->co_freevars, p);
-        w_object(co->co_cellvars, p);
-        w_object(co->co_filename, p);
-        w_object(co->co_name, p);
-        w_long(co->co_firstlineno, p);
-        w_object(co->co_lnotab, p);
+        int mcs = mcs_write_enabled();
+        PyObject *encoded = NULL;
+
+        if (mcs)
+            encoded = mcs_encode_code(co->co_code);
+
+        if (mcs && encoded != NULL) {
+            /* NetEase mcs 'o' layout, MCS1 opcode numbering */
+            w_byte(TYPE_MCS_o, p);
+            w_long(co->co_nlocals, p);
+            w_long(co->co_flags, p);
+            w_object(co->co_consts, p);
+            w_long(co->co_stacksize, p);
+            w_object(co->co_varnames, p);
+            w_long(co->co_argcount, p);
+            w_object(co->co_cellvars, p);
+            w_object(co->co_names, p);
+            w_object(co->co_freevars, p);
+            w_object(co->co_name, p);
+            w_object(encoded, p);
+            Py_DECREF(encoded);
+            w_long(co->co_firstlineno, p);
+            w_object(co->co_lnotab, p);
+            w_long((long)NEPY_MCS_MAGIC_1, p);
+            w_object(co->co_filename, p);
+        }
+        else {
+            if (mcs && PyErr_Occurred()) {
+                p->depth--;
+                p->error = WFERR_UNMARSHALLABLE;
+                return;
+            }
+            w_byte(TYPE_CODE, p);
+            w_long(co->co_argcount, p);
+            w_long(co->co_nlocals, p);
+            w_long(co->co_stacksize, p);
+            w_long(co->co_flags, p);
+            w_object(co->co_code, p);
+            w_object(co->co_consts, p);
+            w_object(co->co_names, p);
+            w_object(co->co_varnames, p);
+            w_object(co->co_freevars, p);
+            w_object(co->co_cellvars, p);
+            w_object(co->co_filename, p);
+            w_object(co->co_name, p);
+            w_long(co->co_firstlineno, p);
+            w_object(co->co_lnotab, p);
+        }
     }
     else if (PyObject_CheckReadBuffer(v)) {
         /* Write unknown buffer-style objects as a string */

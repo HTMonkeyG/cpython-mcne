@@ -92,7 +92,10 @@ PyAPI_FUNC(void) NEPyCode_SetMagicNum(PyCodeObject *, int);
 /* Set the 8-byte trailer of the code object */
 PyAPI_FUNC(void) NEPyCode_SetTail(PyCodeObject *, void *);
 
-/* mcs magic numbers carried by NEPy code objects */
+/* mcs magic numbers carried by NEPy code objects.
+   MCS1 is the fallback table: the game's dispatcher runs it for every magic
+   that is not MCS2/MCS3, so 0 is used when we *write* MCS1 data. */
+#define NEPY_MCS_MAGIC_1  0x00000000UL
 #define NEPY_MCS_MAGIC_2  0xCA49B20FUL
 #define NEPY_MCS_MAGIC_3  0xBC58DBD5UL
 
