@@ -33,7 +33,9 @@ PCbuild/*.exp
 PCbuild/*.lib
 PCbuild/*.ncb
 PCbuild/*.o
+PCbuild/*.obj
 PCbuild/*.pdb
+PCbuild/*.vcxproj.user
 PCbuild/Win32-temp-*
 PCbuild/amd64
 PCbuild/obj
