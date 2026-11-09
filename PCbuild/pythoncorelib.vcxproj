@@ -84,7 +84,7 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
     <_ProjectFileVersion>10.0.30319.1</_ProjectFileVersion>
-    <TargetName>libpython27</TargetName>
+    <TargetName>libpythoncore27</TargetName>
     <!-- For VS2008, we have to embed the manifest to be able to run -->
     <GenerateManifest Condition="'$(PlatformToolset)' == 'v90' or '$(BasePlatformToolset)' == 'v90'">true</GenerateManifest>
     <EmbedManifest Condition="'$(PlatformToolset)' == 'v90' or '$(BasePlatformToolset)' == 'v90'">true</EmbedManifest>
@@ -96,7 +96,7 @@
     <ClCompile>
       <AdditionalOptions>/Zm200  %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(PySourcePath)Python;$(PySourcePath)Modules\zlib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>Py_BUILD_CORE;Py_ENABLE_SHARED;MS_DLL_ID="$(SysWinVer)";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>Py_BUILD_CORE;Py_NO_ENABLE_SHARED;MS_DLL_ID="$(SysWinVer)";%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <AdditionalDependencies>ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
