@@ -11,7 +11,6 @@ forgotten) from the programmer.
 #include "Python.h"
 #include "windows.h"
 
-#ifdef Py_ENABLE_SHARED
 char dllVersionBuffer[16] = ""; // a private buffer
 
 // Python Globals
@@ -75,6 +74,8 @@ void _Py_DeactivateActCtx(ULONG_PTR cookie)
         if (!(*pfnDeactivateActCtx)(0, cookie))
             OutputDebugString("Python failed to de-activate the activation context\n");
 }
+
+#ifdef Py_ENABLE_SHARED
 
 BOOL    WINAPI  DllMain (HANDLE hInst,
                                                 ULONG ul_reason_for_call,
